@@ -59,3 +59,125 @@ EXPECT=<<EOF
 1
 EOF
 RUN
+
+NAME=gopclntab moduledata
+FILE=bins/elf/go-cdetect
+CMDS=<<EOF
+a:gopclntab mod
+EOF
+EXPECT=<<EOF
+============================================================
+  Go moduledata
+============================================================
+  Address:         0x584500
+  Layout:          go1.18+
+  minpc:           0x401000
+  maxpc:           0x4bf3e5
+  text:            0x401000
+  etext:           0x4bf3e5
+============================================================
+
+EOF
+RUN
+
+NAME=gopclntab package dependencies
+FILE=bins/elf/go-cdetect
+CMDS=<<EOF
+a:gopclntab pkgs
+EOF
+EXPECT=<<EOF
+Package paths (42):
+------------------------------------------------------------
+internal/cpu                                     5
+runtime/internal/sys                             1
+internal/bytealg                                 13
+runtime                                          1048
+runtime/internal/syscall                         1
+sync/atomic                                      8
+reflect                                          91
+sync                                             43
+internal/poll                                    29
+os                                               21
+syscall                                          21
+runtime/debug                                    1
+internal/reflectlite                             9
+time                                             41
+errors                                           2
+math                                             8
+unicode/utf8                                     7
+strconv                                          37
+unicode                                          9
+internal/itoa                                    1
+sort                                             11
+internal/fmtsort                                 6
+io                                               4
+internal/oserror                                 1
+path                                             3
+io/fs                                            4
+internal/testlog                                 5
+internal/syscall/unix                            1
+fmt                                              48
+strings                                          12
+bytes                                            10
+bufio                                            5
+compress/flate                                   39
+hash/adler32                                     3
+encoding/binary                                  30
+compress/zlib                                    5
+debug/dwarf                                      1
+debug/elf                                        36
+regexp/syntax                                    74
+regexp                                           50
+github.com/xyproto/ainur                         13
+main                                             2
+
+EOF
+RUN
+
+NAME=gopclntab runtime structures
+FILE=bins/elf/go-cdetect
+CMDS=<<EOF
+a:gopclntab rts
+EOF
+EXPECT=<<EOF
+KIND       ADDRESS        RUNTIME FUNCTION
+----------------------------------------------------------------------
+goroutine  0x0043c6e0   runtime.newproc  (0 callsites)
+goroutine  0x0043c7e0   runtime.newproc1
+goroutine  0x0045d0e0   runtime.goexit
+defer      0x00430160   runtime.deferprocStack  (0 callsites)
+defer      0x00430780   runtime.deferreturn  (0 callsites)
+scheduler  0x00434500   runtime.gopark  (0 callsites)
+scheduler  0x0045afa0   runtime.mcall
+scheduler  0x0045b0c0   runtime.morestack
+panic      0x00431300   runtime.gopanic  (0 callsites)
+panic      0x00431a40   runtime.gorecover
+
+EOF
+RUN
+
+NAME=gopclntab aaa auto apply
+FILE=bins/elf/go-cdetect
+CMDS=<<EOF
+e bin.dbginfo=false
+aaa
+afl~main.main
+CC~goroutine spawn~?
+CC~defer registered~?
+EOF
+EXPECT=<<EOF
+0x004bf140   26    677 main.main
+6
+5
+EOF
+RUN
+
+NAME=gopclntab json export
+FILE=hex://7f454c4602010100000000000000000002003e000100000000004000000000004000000000000000d00100000000000000000000400038000100400003000200010000000500000000000000000000000000400000000000000040000000000090020000000000009002000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f0ffffff00000108080000000000000000000000000000000000400000000000b000000000000000000000000000000000000000000000000000000000000000480000000000000000000000400000001000000040000000200000004000000030000000400000004000000040000000500000004000000060000000400000007000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000006d61696e2e6d61696e00002e676f70636c6e746162002e736873747274616200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000001000000020000000000000000014000000000000001000000000000ba000000000000000000000000000000010000000000000000000000000000000c0000000300000000000000000000000000000000000000ba010000000000001600000000000000000000000000000001000000000000000000000000000000
+CMDS=<<EOF
+a:gopclntab json
+EOF
+EXPECT=<<EOF
+{"header":{"magic":"0xfffffff0","version":"1.18","ptrSize":8,"minLC":1,"nfunc":8,"nfiles":0,"textStart":"0x400000"},"functions":[{"name":"main.main","addr":"0x400000","args":0,"source_file":"","start_line":0},{"name":"main.main","addr":"0x400010","args":0,"source_file":"","start_line":0},{"name":"main.main","addr":"0x400020","args":0,"source_file":"","start_line":0},{"name":"main.main","addr":"0x400030","args":0,"source_file":"","start_line":0},{"name":"main.main","addr":"0x400040","args":0,"source_file":"","start_line":0},{"name":"main.main","addr":"0x400050","args":0,"source_file":"","start_line":0},{"name":"main.main","addr":"0x400060","args":0,"source_file":"","start_line":0},{"name":"main.main","addr":"0x400070","args":0,"source_file":"","start_line":0}],"module":null,"packages":[{"path":"main","functions":8}],"runtime":[],"files":[],"num_source_files":0}
+EOF
+RUN

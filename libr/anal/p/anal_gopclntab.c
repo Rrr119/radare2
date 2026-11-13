@@ -51,9 +51,25 @@ typedef struct {
 } GoPclnFunc;
 
 typedef struct {
+	ut64 addr;
+	ut64 minpc;
+	ut64 maxpc;
+	ut64 text;
+	ut64 etext;
+	int layout; // 16 = go1.16/1.17, 18 = go1.18+
+	bool found;
+} GoModuleData;
+
+typedef struct {
+	char *path;
+	ut64 count;
+} GoPackage;
+
+typedef struct {
 	RAnal *anal;
 	RCore *core;
 	GoPcHeader header;
+	GoModuleData module;
 	RList/*<GoPclnFunc *>*/ *functions;
 	RList/*<char *>*/ *source_files;
 	ut8 *section_data;
@@ -64,7 +80,7 @@ typedef struct {
 	bool big_endian;
 } GoPclnCtx;
 
-typedef bool (*GoSectionIterCb)(const char *name, ut64 vaddr, ut64 size, void *user);
+typedef bool (*GoSectionIterCb)(const char *name, const char *perm, ut64 vaddr, ut64 size, void *user);
 
 static void go_func_free(GoPclnFunc *f) {
 	if (!f) {
@@ -419,12 +435,13 @@ static bool go_sections_foreach(GoPclnCtx *ctx, GoSectionIterCb cb, void *user) 
 			continue;
 		}
 		const char *name = r_json_get_str (item, "name");
+		const char *perm = r_json_get_str (item, "perm");
 		st64 vaddr = r_json_get_num (item, "vaddr");
 		st64 size = r_json_get_num (item, "vsize");
 		if (size <= 0) {
 			size = r_json_get_num (item, "size");
 		}
-		if (!cb (name, vaddr >= 0? (ut64)vaddr: 0, size > 0? (ut64)size: 0, user)) {
+		if (!cb (name, perm, vaddr >= 0? (ut64)vaddr: 0, size > 0? (ut64)size: 0, user)) {
 			break;
 		}
 	}
@@ -440,8 +457,9 @@ static bool go_is_named_pclntab_section(const char *name) {
 	return strstr (name, ".gopclntab") || strstr (name, "__gopclntab");
 }
 
-static bool go_try_named_section_cb(const char *name, ut64 vaddr, ut64 size, void *user) {
+static bool go_try_named_section_cb(const char *name, const char *perm, ut64 vaddr, ut64 size, void *user) {
 	GoPclnCtx *ctx = (GoPclnCtx *)user;
+	(void)perm;
 	if (!go_is_named_pclntab_section (name)) {
 		return true;
 	}
@@ -485,9 +503,10 @@ static bool go_find_magic_in_buf(GoPclnCtx *ctx, const ut8 *buf, ut64 size, ut64
 	return false;
 }
 
-static bool go_try_scan_sections_cb(const char *name, ut64 vaddr, ut64 sec_size, void *user) {
+static bool go_try_scan_sections_cb(const char *name, const char *perm, ut64 vaddr, ut64 sec_size, void *user) {
 	GoPclnCtx *ctx = (GoPclnCtx *)user;
 	(void)name;
+	(void)perm;
 	if (sec_size < 64) {
 		return true;
 	}
@@ -521,9 +540,10 @@ static bool go_try_scan_sections(GoPclnCtx *ctx) {
 	return go_sections_foreach (ctx, go_try_scan_sections_cb, ctx) && ctx->section_data;
 }
 
-static bool go_get_text_vaddr_cb(const char *name, ut64 vaddr, ut64 size, void *user) {
+static bool go_get_text_vaddr_cb(const char *name, const char *perm, ut64 vaddr, ut64 size, void *user) {
 	ut64 *res = (ut64 *)user;
 	(void)size;
+	(void)perm;
 	if (R_STR_ISEMPTY (name)) {
 		return true;
 	}
@@ -555,6 +575,156 @@ static void go_resolve_text_base(GoPclnCtx *ctx) {
 		ctx->text_base = 0;
 		break;
 	}
+}
+
+static bool go_read_remote(GoPclnCtx *ctx, ut64 addr, ut8 *buf, int len) {
+	R_RETURN_VAL_IF_FAIL (ctx && buf && len > 0, false);
+	return ctx->anal->iob.read_at (ctx->anal->iob.io, addr, buf, len) == len;
+}
+
+static ut64 go_buf_ptr(const ut8 *buf, int off, int ptr_size, bool be) {
+	return (ptr_size == 4)? r_read_ble32 (buf + off, be): r_read_ble64 (buf + off, be);
+}
+
+static bool go_ptr_in_pclntab(GoPclnCtx *ctx, ut64 ptr) {
+	return ptr >= ctx->section_vaddr && ptr < ctx->section_vaddr + ctx->section_size;
+}
+
+// Validate a go1.16/1.17 moduledata whose pclntable slice starts at base.
+static bool go_moduledata_check_116(GoPclnCtx *ctx, ut64 base, GoModuleData *md) {
+	const int ptr = ctx->header.ptr_size;
+	ut8 buf[14 * 8];
+	if (!go_read_remote (ctx, base, buf, 14 * ptr)) {
+		return false;
+	}
+	const ut64 len = go_buf_ptr (buf, ptr, ptr, ctx->big_endian);
+	const ut64 cap = go_buf_ptr (buf, 2 * ptr, ptr, ctx->big_endian);
+	if (!len || len != cap || len > GO_MAX_SECTION_READ) {
+		return false;
+	}
+	if (len + 64 < ctx->section_size) {
+		return false;
+	}
+	const ut64 ftab_ptr = go_buf_ptr (buf, 3 * ptr, ptr, ctx->big_endian);
+	const ut64 ftab_len = go_buf_ptr (buf, 4 * ptr, ptr, ctx->big_endian);
+	const ut64 filetab_ptr = go_buf_ptr (buf, 6 * ptr, ptr, ctx->big_endian);
+	if (!go_ptr_in_pclntab (ctx, ftab_ptr) || !go_ptr_in_pclntab (ctx, filetab_ptr)) {
+		return false;
+	}
+	if (ftab_len != ctx->header.nfunc && ftab_len != ctx->header.nfunc + 1) {
+		return false;
+	}
+	const ut64 minpc = go_buf_ptr (buf, 10 * ptr, ptr, ctx->big_endian);
+	const ut64 maxpc = go_buf_ptr (buf, 11 * ptr, ptr, ctx->big_endian);
+	const ut64 text = go_buf_ptr (buf, 12 * ptr, ptr, ctx->big_endian);
+	const ut64 etext = go_buf_ptr (buf, 13 * ptr, ptr, ctx->big_endian);
+	if (!minpc || minpc > maxpc || !text || etext <= text) {
+		return false;
+	}
+	md->addr = base;
+	md->minpc = minpc;
+	md->maxpc = maxpc;
+	md->text = text;
+	md->etext = etext;
+	md->layout = 16;
+	md->found = true;
+	return true;
+}
+
+// Validate a go1.18+ moduledata whose pcHeader field sits at base.
+static bool go_moduledata_check_118(GoPclnCtx *ctx, ut64 base, GoModuleData *md) {
+	const int ptr = ctx->header.ptr_size;
+	ut8 buf[24 * 8];
+	if (!go_read_remote (ctx, base, buf, 24 * ptr)) {
+		return false;
+	}
+	if (go_buf_ptr (buf, 0, ptr, ctx->big_endian) != ctx->section_vaddr) {
+		return false;
+	}
+	const ut64 funcnametab_ptr = go_buf_ptr (buf, ptr, ptr, ctx->big_endian);
+	const ut64 pctab_ptr = go_buf_ptr (buf, 10 * ptr, ptr, ctx->big_endian);
+	if (!go_ptr_in_pclntab (ctx, funcnametab_ptr) || !go_ptr_in_pclntab (ctx, pctab_ptr)) {
+		return false;
+	}
+	const ut64 ftab_ptr = go_buf_ptr (buf, 16 * ptr, ptr, ctx->big_endian);
+	const ut64 ftab_len = go_buf_ptr (buf, 17 * ptr, ptr, ctx->big_endian);
+	if (!go_ptr_in_pclntab (ctx, ftab_ptr)) {
+		return false;
+	}
+	if (ftab_len != ctx->header.nfunc && ftab_len != ctx->header.nfunc + 1) {
+		return false;
+	}
+	const ut64 minpc = go_buf_ptr (buf, 20 * ptr, ptr, ctx->big_endian);
+	const ut64 maxpc = go_buf_ptr (buf, 21 * ptr, ptr, ctx->big_endian);
+	const ut64 text = go_buf_ptr (buf, 22 * ptr, ptr, ctx->big_endian);
+	const ut64 etext = go_buf_ptr (buf, 23 * ptr, ptr, ctx->big_endian);
+	if (!minpc || minpc > maxpc || !text || etext <= text) {
+		return false;
+	}
+	md->addr = base;
+	md->minpc = minpc;
+	md->maxpc = maxpc;
+	md->text = text;
+	md->etext = etext;
+	md->layout = 18;
+	md->found = true;
+	return true;
+}
+
+static bool go_scan_moduledata_cb(const char *name, const char *perm, ut64 vaddr, ut64 size, void *user) {
+	GoPclnCtx *ctx = (GoPclnCtx *)user;
+	(void)name;
+	if (ctx->module.found || vaddr == ctx->section_vaddr) {
+		return !ctx->module.found;
+	}
+	if (R_STR_ISNOTEMPTY (perm) && strchr (perm, 'x')) {
+		return true;
+	}
+	const int ptr = ctx->header.ptr_size;
+	if (size < (ut64)(24 * ptr) || size > GO_MAX_SECTION_READ) {
+		return true;
+	}
+	ut8 *buf = malloc ((size_t)GO_SCAN_CHUNK);
+	if (!buf) {
+		return false;
+	}
+	ut64 chunk_off;
+	for (chunk_off = 0; chunk_off < size && !ctx->module.found; chunk_off += GO_SCAN_STEP) {
+		const ut64 read_size = R_MIN ((ut64)GO_SCAN_CHUNK, size - chunk_off);
+		if (ctx->anal->iob.read_at (ctx->anal->iob.io, vaddr + chunk_off, buf, (int)read_size) != (int)read_size) {
+			continue;
+		}
+		ut64 i;
+		for (i = 0; i + ptr <= read_size; i += ptr) {
+			const ut64 val = go_buf_ptr (buf, (int)i, ptr, ctx->big_endian);
+			if (val != ctx->section_vaddr) {
+				continue;
+			}
+			const ut64 hit = vaddr + chunk_off + i;
+			// go1.18+ keeps a pcHeader pointer to the pclntab start at offset 0
+			if (go_moduledata_check_118 (ctx, hit, &ctx->module)) {
+				break;
+			}
+			// some layouts self-reference pclntable 13 pointer fields in
+			const ut64 base118 = hit - 13 * ptr;
+			if (base118 <= hit && go_moduledata_check_118 (ctx, base118, &ctx->module)) {
+				break;
+			}
+			if (go_moduledata_check_116 (ctx, hit, &ctx->module)) {
+				break;
+			}
+		}
+	}
+	free (buf);
+	return !ctx->module.found;
+}
+
+static void go_locate_moduledata(GoPclnCtx *ctx) {
+	R_RETURN_IF_FAIL (ctx);
+	if (ctx->module.found) {
+		return;
+	}
+	go_sections_foreach (ctx, go_scan_moduledata_cb, ctx);
 }
 
 static bool go_add_source_file(GoPclnCtx *ctx, const char *path) {
@@ -808,6 +978,114 @@ error:
 	return false;
 }
 
+// "github.com/foo/bar.(*T).M" -> "github.com/foo/bar", "main.main" -> "main"
+static char *go_package_path_of(const char *fname) {
+	R_RETURN_VAL_IF_FAIL (fname, NULL);
+	// skip autogenerated type descriptor helpers, not real packages
+	if (r_str_startswith (fname, "type.") || r_str_startswith (fname, "type:")) {
+		return NULL;
+	}
+	const char *slash = strrchr (fname, '/');
+	const char *start = slash? slash + 1: fname;
+	const char *dot = strchr (start, '.');
+	if (!dot || dot == start) {
+		return NULL;
+	}
+	return r_str_ndup (fname, (int)(dot - fname));
+}
+
+static void go_package_free(GoPackage *pkg) {
+	if (!pkg) {
+		return;
+	}
+	free (pkg->path);
+	free (pkg);
+}
+
+static RList *go_packages_build(const GoPclnCtx *ctx) {
+	R_RETURN_VAL_IF_FAIL (ctx, NULL);
+	RList *pkgs = r_list_newf ((RListFree)go_package_free);
+	if (!pkgs) {
+		return NULL;
+	}
+	RListIter *iter;
+	GoPclnFunc *f;
+	r_list_foreach (ctx->functions, iter, f) {
+		char *path = go_package_path_of (f->name);
+		if (!path) {
+			continue;
+		}
+		GoPackage *pkg = NULL;
+		RListIter *it;
+		GoPackage *p;
+		r_list_foreach (pkgs, it, p) {
+			if (!strcmp (p->path, path)) {
+				pkg = p;
+				break;
+			}
+		}
+		if (pkg) {
+			pkg->count++;
+			free (path);
+			continue;
+		}
+		pkg = R_NEW0 (GoPackage);
+		pkg->path = path;
+		pkg->count = 1;
+		r_list_append (pkgs, pkg);
+	}
+	return pkgs;
+}
+
+typedef struct {
+	const char *name;
+	const char *kind;
+	const char *callsite; // comment for xref sites, NULL to skip annotation
+} GoRtSym;
+
+static const GoRtSym go_rt_syms[] = {
+	{ "runtime.newproc", "goroutine", "goroutine spawn (runtime.newproc)" },
+	{ "runtime.newproc1", "goroutine", NULL },
+	{ "runtime.goexit", "goroutine", NULL },
+	{ "runtime.deferproc", "defer", "defer registered (runtime.deferproc)" },
+	{ "runtime.deferprocStack", "defer", "defer registered (runtime.deferprocStack)" },
+	{ "runtime.deferreturn", "defer", "defer return (runtime.deferreturn)" },
+	{ "runtime.gopark", "scheduler", "goroutine park (runtime.gopark)" },
+	{ "runtime.gosched", "scheduler", "goroutine yield (runtime.gosched)" },
+	{ "runtime.mcall", "scheduler", NULL },
+	{ "runtime.morestack", "scheduler", NULL },
+	{ "runtime.gopanic", "panic", "panic raised (runtime.gopanic)" },
+	{ "runtime.gorecover", "panic", NULL },
+};
+
+static ut64 go_find_func_addr(const GoPclnCtx *ctx, const char *name) {
+	RListIter *iter;
+	GoPclnFunc *f;
+	r_list_foreach (ctx->functions, iter, f) {
+		if (f->name && !strcmp (f->name, name)) {
+			return f->addr;
+		}
+	}
+	return 0;
+}
+
+static int go_rt_callsite_count(const GoPclnCtx *ctx, ut64 addr) {
+	RVecAnalRef *xrefs = r_anal_xrefs_get (ctx->anal, addr);
+	if (!xrefs) {
+		return 0;
+	}
+	int count = 0;
+	RAnalRef *ref;
+	R_VEC_FOREACH (xrefs, ref) {
+		const int t = ref->type & R_ANAL_REF_TYPE_MASK;
+		if (t == R_ANAL_REF_TYPE_CALL || t == R_ANAL_REF_TYPE_ICOD) {
+			count++;
+		}
+	}
+	RVecAnalRef_free (xrefs);
+	return count;
+}
+
 static char *go_format_header(const GoPclnCtx *ctx) {
 	R_RETURN_VAL_IF_FAIL (ctx, NULL);
 	const GoPcHeader *h = &ctx->header;
@@ -907,6 +1185,88 @@ static char *go_hexstr(ut64 n) {
 	return r_str_newf ("0x%"PFMT64x, n);
 }
 
+static char *go_format_moduledata(GoPclnCtx *ctx) {
+	R_RETURN_VAL_IF_FAIL (ctx, NULL);
+	go_locate_moduledata (ctx);
+	RStrBuf *sb = r_strbuf_new ("");
+	if (!sb) {
+		return NULL;
+	}
+	if (!ctx->module.found) {
+		r_strbuf_append (sb, "[-] moduledata not found\n");
+		return r_strbuf_drain (sb);
+	}
+	const GoModuleData *md = &ctx->module;
+	r_strbuf_append (sb, "============================================================\n");
+	r_strbuf_append (sb, "  Go moduledata\n");
+	r_strbuf_append (sb, "============================================================\n");
+	r_strbuf_appendf (sb, "  Address:         0x%"PFMT64x"\n", md->addr);
+	r_strbuf_appendf (sb, "  Layout:          go1.%s\n", md->layout == 18? "18+": "16/1.17");
+	r_strbuf_appendf (sb, "  minpc:           0x%"PFMT64x"\n", md->minpc);
+	r_strbuf_appendf (sb, "  maxpc:           0x%"PFMT64x"\n", md->maxpc);
+	r_strbuf_appendf (sb, "  text:            0x%"PFMT64x"\n", md->text);
+	r_strbuf_appendf (sb, "  etext:           0x%"PFMT64x"\n", md->etext);
+	r_strbuf_append (sb, "============================================================\n");
+	return r_strbuf_drain (sb);
+}
+
+static char *go_format_packages(GoPclnCtx *ctx) {
+	R_RETURN_VAL_IF_FAIL (ctx, NULL);
+	RList *pkgs = go_packages_build (ctx);
+	if (!pkgs) {
+		return NULL;
+	}
+	RStrBuf *sb = r_strbuf_new ("");
+	if (!sb) {
+		r_list_free (pkgs);
+		return NULL;
+	}
+	if (r_list_empty (pkgs)) {
+		r_strbuf_append (sb, "[-] No packages found\n");
+		r_list_free (pkgs);
+		return r_strbuf_drain (sb);
+	}
+	r_strbuf_appendf (sb, "Package paths (%d):\n", r_list_length (pkgs));
+	r_strbuf_append (sb, "------------------------------------------------------------\n");
+	RListIter *iter;
+	GoPackage *pkg;
+	r_list_foreach (pkgs, iter, pkg) {
+		r_strbuf_appendf (sb, "%-48s %"PFMT64u"\n", pkg->path, pkg->count);
+	}
+	r_list_free (pkgs);
+	return r_strbuf_drain (sb);
+}
+
+static char *go_format_runtime(GoPclnCtx *ctx) {
+	R_RETURN_VAL_IF_FAIL (ctx, NULL);
+	RStrBuf *sb = r_strbuf_new ("");
+	if (!sb) {
+		return NULL;
+	}
+	r_strbuf_append (sb, "KIND       ADDRESS        RUNTIME FUNCTION\n");
+	r_strbuf_append (sb, "----------------------------------------------------------------------\n");
+	size_t i;
+	int found = 0;
+	for (i = 0; i < R_ARRAY_SIZE (go_rt_syms); i++) {
+		const GoRtSym *sym = &go_rt_syms[i];
+		const ut64 addr = go_find_func_addr (ctx, sym->name);
+		if (!addr) {
+			continue;
+		}
+		const int callsites = go_rt_callsite_count (ctx, addr);
+		r_strbuf_appendf (sb, "%-10s 0x%08"PFMT64x"   %s", sym->kind, addr, sym->name);
+		if (sym->callsite) {
+			r_strbuf_appendf (sb, "  (%d callsites)", callsites);
+		}
+		r_strbuf_append (sb, "\n");
+		found++;
+	}
+	if (!found) {
+		r_strbuf_append (sb, "[-] No goroutine/defer runtime structures found\n");
+	}
+	return r_strbuf_drain (sb);
+}
+
 static char *go_format_json(const GoPclnCtx *ctx) {
 	R_RETURN_VAL_IF_FAIL (ctx, NULL);
 	PJ *pj = pj_new ();
@@ -938,6 +1298,67 @@ static char *go_format_json(const GoPclnCtx *ctx) {
 		pj_kN (pj, "start_line", f->start_line);
 		free (addr);
 		pj_end (pj);
+	}
+	pj_end (pj);
+	if (ctx->module.found) {
+		pj_ko (pj, "module");
+		char *addr = go_hexstr (ctx->module.addr);
+		char *minpc = go_hexstr (ctx->module.minpc);
+		char *maxpc = go_hexstr (ctx->module.maxpc);
+		char *text = go_hexstr (ctx->module.text);
+		char *etext = go_hexstr (ctx->module.etext);
+		pj_ks (pj, "addr", addr);
+		pj_ks (pj, "layout", ctx->module.layout == 18? "go1.18+": "go1.16/1.17");
+		pj_ks (pj, "minpc", minpc);
+		pj_ks (pj, "maxpc", maxpc);
+		pj_ks (pj, "text", text);
+		pj_ks (pj, "etext", etext);
+		free (addr);
+		free (minpc);
+		free (maxpc);
+		free (text);
+		free (etext);
+		pj_end (pj);
+	} else {
+		pj_knull (pj, "module");
+	}
+	pj_ka (pj, "packages");
+	RList *pkgs = go_packages_build (ctx);
+	if (pkgs) {
+		RListIter *piter;
+		GoPackage *pkg;
+		r_list_foreach (pkgs, piter, pkg) {
+			pj_o (pj);
+			pj_ks (pj, "path", pkg->path);
+			pj_kn (pj, "functions", pkg->count);
+			pj_end (pj);
+		}
+		r_list_free (pkgs);
+	}
+	pj_end (pj);
+	pj_ka (pj, "runtime");
+	size_t ri;
+	for (ri = 0; ri < R_ARRAY_SIZE (go_rt_syms); ri++) {
+		const GoRtSym *sym = &go_rt_syms[ri];
+		const ut64 addr = go_find_func_addr (ctx, sym->name);
+		if (!addr) {
+			continue;
+		}
+		pj_o (pj);
+		char *addrstr = go_hexstr (addr);
+		pj_ks (pj, "name", sym->name);
+		pj_ks (pj, "kind", sym->kind);
+		pj_ks (pj, "addr", addrstr);
+		pj_kn (pj, "callsites", go_rt_callsite_count (ctx, addr));
+		free (addrstr);
+		pj_end (pj);
+	}
+	pj_end (pj);
+	pj_ka (pj, "files");
+	RListIter *fiter;
+	const char *path;
+	r_list_foreach (ctx->source_files, fiter, path) {
+		pj_s (pj, path);
 	}
 	pj_end (pj);
 	pj_kn (pj, "num_source_files", r_list_length (ctx->source_files));
@@ -1024,6 +1445,36 @@ static char *go_create_function_name(RAnal *anal, ut64 addr, const char *safe_na
 	return NULL;
 }
 
+static int go_apply_runtime_annotations(GoPclnCtx *ctx) {
+	int annotated = 0;
+	size_t i;
+	for (i = 0; i < R_ARRAY_SIZE (go_rt_syms); i++) {
+		const GoRtSym *sym = &go_rt_syms[i];
+		if (!sym->callsite) {
+			continue;
+		}
+		const ut64 addr = go_find_func_addr (ctx, sym->name);
+		if (!addr) {
+			continue;
+		}
+		RVecAnalRef *xrefs = r_anal_xrefs_get (ctx->anal, addr);
+		if (!xrefs) {
+			continue;
+		}
+		RAnalRef *ref;
+		R_VEC_FOREACH (xrefs, ref) {
+			const int t = ref->type & R_ANAL_REF_TYPE_MASK;
+			if (t != R_ANAL_REF_TYPE_CALL && t != R_ANAL_REF_TYPE_ICOD) {
+				continue;
+			}
+			go_append_unique_comment (ctx->anal, ref->addr, sym->callsite);
+			annotated++;
+		}
+		RVecAnalRef_free (xrefs);
+	}
+	return annotated;
+}
+
 static char *go_apply_functions(GoPclnCtx *ctx) {
 	R_RETURN_VAL_IF_FAIL (ctx, NULL);
 	int applied = 0;
@@ -1072,7 +1523,15 @@ static char *go_apply_functions(GoPclnCtx *ctx) {
 		free (applied_name);
 		applied++;
 	}
-	return r_str_newf ("[+] Applied %d function names to radare2 (%d skipped)", applied, skipped);
+	const int annotated = go_apply_runtime_annotations (ctx);
+	return r_str_newf ("[+] Applied %d function names to radare2 (%d skipped, %d runtime callsites annotated)",
+		applied, skipped, annotated);
+}
+
+static char *go_annotate_runtime(GoPclnCtx *ctx) {
+	R_RETURN_VAL_IF_FAIL (ctx, NULL);
+	const int annotated = go_apply_runtime_annotations (ctx);
+	return r_str_newf ("[+] Annotated %d goroutine/defer runtime callsites", annotated);
 }
 
 static char *go_run_default(const GoPclnCtx *ctx) {
@@ -1097,8 +1556,12 @@ static char *gopclntab_help(void) {
 	r_strbuf_append (sb, "| a:gopclntab            parse gopclntab and show header plus recovered functions\n");
 	r_strbuf_append (sb, "| a:gopclntab list       list recovered functions\n");
 	r_strbuf_append (sb, "| a:gopclntab apply      create/rename functions, go flags, and comments\n");
+	r_strbuf_append (sb, "| a:gopclntab annotate   comment goroutine/defer runtime callsites (needs xrefs)\n");
 	r_strbuf_append (sb, "| a:gopclntab files      list recovered source files\n");
-	r_strbuf_append (sb, "| a:gopclntab json       print recovered data as json\n");
+	r_strbuf_append (sb, "| a:gopclntab mod        locate and show the Go moduledata structure\n");
+	r_strbuf_append (sb, "| a:gopclntab pkgs       list recovered package paths (module dependencies)\n");
+	r_strbuf_append (sb, "| a:gopclntab rts        list goroutine/defer/scheduler runtime structures\n");
+	r_strbuf_append (sb, "| a:gopclntab json       print recovered data as json (functions, packages, files)\n");
 	r_strbuf_append (sb, "| a:gopclntab name <s>   filter recovered functions by substring\n");
 	return r_strbuf_drain (sb);
 }
@@ -1122,9 +1585,18 @@ static char *gopclntab_cmd(RAnal *anal, const char *input) {
 		out = go_format_functions (&ctx, NULL);
 	} else if (!strcmp (args, "apply")) {
 		out = go_apply_functions (&ctx);
+	} else if (!strcmp (args, "annotate")) {
+		out = go_annotate_runtime (&ctx);
 	} else if (!strcmp (args, "files")) {
 		out = go_format_files (&ctx);
+	} else if (!strcmp (args, "mod")) {
+		out = go_format_moduledata (&ctx);
+	} else if (!strcmp (args, "pkgs")) {
+		out = go_format_packages (&ctx);
+	} else if (!strcmp (args, "rts")) {
+		out = go_format_runtime (&ctx);
 	} else if (!strcmp (args, "json")) {
+		go_locate_moduledata (&ctx);
 		out = go_format_json (&ctx);
 	} else if (r_str_startswith (args, "name ")) {
 		out = go_format_functions (&ctx, r_str_trim_head_ro (args + 5));
@@ -1140,7 +1612,7 @@ RAnalPlugin r_anal_plugin_gopclntab = {
 	.meta = {
 		.name = "gopclntab",
 		.author = "AsherDLL",
-		.desc = "Parse Go gopclntab metadata and recover function names",
+		.desc = "Parse Go gopclntab/moduledata, recover functions, packages and runtime structures",
 		.license = "MIT",
 	},
 	.cmd = gopclntab_cmd,

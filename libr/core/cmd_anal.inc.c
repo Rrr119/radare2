@@ -15598,7 +15598,7 @@ static void cmd_aaa(RCore *core, const char *input) {
 		const bool is_go = r_str_startswith (r_config_get (core->config, "bin.lang"), "go");
 		if (is_go) {
 			logline (core, 20, "Find function and symbol names from golang binaries (aang)");
-			free (r_anal_cmd (core->anal, "autoname golang"));
+			r_core_anal_autoname_all_golang_fcns (core);
 			logline (core, 25, "Analyze all flags starting with sym.go. (aF @@f:sym.go.*)");
 			r_core_cmd0 (core, "aF @@@F:sym.go.*");
 		}
@@ -15646,6 +15646,10 @@ static void cmd_aaa(RCore *core, const char *input) {
 		r_core_task_yield (&core->tasks);
 		if (r_cons_is_breaked (core->cons)) {
 			goto jacuzzi;
+		}
+		if (is_go) {
+			logline (core, 42, "Annotate golang goroutine/defer runtime callsites");
+			free (r_anal_cmd (core->anal, "gopclntab annotate"));
 		}
 		if (is_apple_target (core)) {
 			logline (core, 45, "Check for objc references (aao)");
@@ -16064,7 +16068,7 @@ static bool cmd_anal_all(RCore *core, const char *input) {
 			r_core_anal_propagate_noreturn (core, UT64_MAX);
 			break;
 		case 'g': // "aang"
-			free (r_anal_cmd (core->anal, "autoname golang"));
+			r_core_anal_autoname_all_golang_fcns (core);
 			break;
 		case '?':
 			r_cons_cmd_help (core->cons, help_msg_aan);
