@@ -1154,6 +1154,32 @@ R_API bool r_anal_function_was_modified(RAnalFunction *fcn);
 R_API RGraph *r_anal_function_get_graph(RAnalFunction *fcn, RGraphNode **node_ptr, ut64 addr);
 R_API bool r_anal_function_switches_foreach(RAnalFunction *fcn, RAnalFunctionSwitchCb cb, void *user);
 
+typedef struct r_anal_deobf_flatten_options_t {
+	int min_cases; // minimum dispatcher switch cases considered for flattening
+} RAnalDeobfFlattenOptions;
+
+typedef struct r_anal_deobf_flatten_stats_t {
+	bool recognized;
+	bool changed;
+	bool indirect;
+	ut64 dispatcher;
+	char *state_var;
+	int cases;
+	int backedges;
+	int state_blocks;
+	int rewired;
+	int edges;
+	int removed;
+	int blocks_before;
+	int blocks_after;
+} RAnalDeobfFlattenStats;
+
+R_API void r_anal_deobf_flatten_options_init(RAnalDeobfFlattenOptions *options);
+R_API void r_anal_deobf_flatten_stats_fini(RAnalDeobfFlattenStats *stats);
+// Rewires the flattened CFG in place; stats->state_var is released by stats_fini().
+R_API bool r_anal_deobf_flatten(RAnal *anal, RAnalFunction *fcn,
+		const RAnalDeobfFlattenOptions *options, RAnalDeobfFlattenStats *stats);
+
 /* anal.c */
 R_API RAnal *r_anal_new(void);
 R_API void r_anal_purge(RAnal *anal);

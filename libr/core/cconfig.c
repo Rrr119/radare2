@@ -4066,6 +4066,8 @@ R_API int r_core_config_init(RCore *core) {
 	SETCB ("anal.slow", "true", (RConfigCallback)&cb_anal_slow, "uses emulation and deeper analysis for better results");
 	SETS ("anal.emu", "true", "run aaef after analysis");
 	SETS ("anal.emumem", "false", "run aaef with memory cache enabled after analysis (EXPERIMENTAL)");
+	SETB ("anal.ollvm", "false", "recover OLLVM control-flow flattening after aaa (see aafd)");
+	SETI ("anal.ollvm.min_cases", 3, "minimum dispatcher cases for OLLVM flattening recovery");
 	SETCB ("anal.noret", "true", (RConfigCallback)&cb_anal_noret, "propagate noreturn attributes (EXPERIMENTAL)");
 	SETCB ("anal.limits", "false", (RConfigCallback)&cb_anal_limits, "restrict analysis to address range [anal.from:anal.to]");
 	SETICB ("anal.from", -1, (RConfigCallback)&cb_anal_from, "lower limit on the address range for analysis");

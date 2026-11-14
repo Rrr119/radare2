@@ -159,8 +159,9 @@ static RCoreHelpMessage help_msg_avg = {
 };
 
 static RCoreHelpMessage help_msg_aaf = {
-	"Usage:", "aaf[efrt?]", " # analyse all function, see also 'af' and 'afna'",
+	"Usage:", "aaf[defrst?]", " # analyse all function, see also 'af' and 'afna'",
 	"aaf", "", "same as afr@@c:isq",
+	"aafd", "[q] [addr]", "recover OLLVM control-flow flattening (all functions or one block address)",
 	"aafe", " ", "same as aef@@F",
 	"aaff", "", "set a flag for every function",
 	"aafr", " [len]", "consecutive function analysis (e anal.hasnext=1;afr@@c:isq)",
@@ -187,7 +188,8 @@ static RCoreHelpMessage help_msg_aa = {
 	"aad", " [len]", "analyze data references to code",
 	"aae", "[?] [len] ([addr])", "analyze references with ESIL (optionally to address)",
 	"aaef", "", "analyze references with ESIL in all functions",
-	"aaf", "[?][efrt] ", "analyze function relations with flags and type match",
+	"aaf", "[?][defrt] ", "analyze function relations with flags and type match",
+	"aafd", "[q] [addr]", "recover OLLVM control-flow flattening",
 	"aaF", " [sym*]", "set anal.in=block for all the spaces between flags matching glob",
 	"aaFa", " [sym*]", "like aaF but with af, not af+/afb+ (slower, exact)",
 	"aai", "[j]", "show info of all analysis parameters",
@@ -15801,6 +15803,11 @@ static void cmd_aaa(RCore *core, const char *input) {
 			r_core_cmdf (core, "dL %s", dh_orig);
 			r_core_task_yield (&core->tasks);
 		}
+		if (r_config_get_b (core->config, "anal.ollvm")) {
+			logline (core, 99, "Recover OLLVM control-flow flattening (aafdq)");
+			r_core_call (core, "aafdq");
+			r_core_task_yield (&core->tasks);
+		}
 	}
 	r_core_seek (core, curseek, true);
 jacuzzi:
@@ -15921,6 +15928,84 @@ static void cmd_aae(RCore *core, const char *input) {
 	r_config_set_b (core->config, "log.hints", log_hints);
 }
 
+static void cmd_aafd(RCore *core, const char *arg, bool quiet) {
+	RAnalDeobfFlattenOptions options;
+	r_anal_deobf_flatten_options_init (&options);
+	options.min_cases = r_config_get_i (core->config, "anal.ollvm.min_cases");
+	if (options.min_cases < 2) {
+		options.min_cases = 2;
+	}
+
+	ut64 only = UT64_MAX;
+	if (arg && *arg) {
+		only = r_num_math (core->num, arg);
+		if (only == UT64_MAX) {
+			R_LOG_ERROR ("Invalid function address");
+			return;
+		}
+	}
+
+	RListIter *iter;
+	RAnalFunction *fcn;
+	RList *selected = NULL;
+	if (only != UT64_MAX) {
+		fcn = r_anal_get_function_at (core->anal, only);
+		if (!fcn) {
+			selected = r_anal_get_functions_in (core->anal, only);
+			fcn = selected? r_list_first (selected): NULL;
+		}
+		if (!fcn) {
+			R_LOG_ERROR ("No function found at 0x%08" PFMT64x, only);
+			r_list_free (selected);
+			return;
+		}
+	}
+
+	int recovered = 0;
+	if (only == UT64_MAX) {
+		r_list_foreach (core->anal->fcns, iter, fcn) {
+			if (r_cons_is_breaked (core->cons)) {
+				break;
+			}
+			RAnalDeobfFlattenStats stats = { 0 };
+			if (r_anal_deobf_flatten (core->anal, fcn, &options, &stats)) {
+				if (!quiet && stats.changed) {
+					r_cons_printf (core->cons, "OLLVM flatten %s @ 0x%08" PFMT64x
+						": state=%s dispatcher=0x%08" PFMT64x
+						" blocks=%d->%d edges=%d removed=%d\n",
+						fcn->name, fcn->addr, stats.state_var? stats.state_var: "unknown",
+						stats.dispatcher, stats.blocks_before, stats.blocks_after,
+						stats.edges, stats.removed);
+					recovered++;
+				}
+			}
+			r_anal_deobf_flatten_stats_fini (&stats);
+		}
+	} else {
+		RAnalDeobfFlattenStats stats = { 0 };
+		if (r_anal_deobf_flatten (core->anal, fcn, &options, &stats) && !quiet) {
+			if (stats.changed) {
+				r_cons_printf (core->cons, "OLLVM flatten %s @ 0x%08" PFMT64x
+					": state=%s dispatcher=0x%08" PFMT64x
+					" blocks=%d->%d edges=%d removed=%d\n",
+					fcn->name, fcn->addr, stats.state_var? stats.state_var: "unknown",
+					stats.dispatcher, stats.blocks_before, stats.blocks_after,
+					stats.edges, stats.removed);
+				recovered++;
+			} else if (stats.recognized) {
+				r_cons_printf (core->cons, "OLLVM flatten %s @ 0x%08" PFMT64x
+					": dispatcher found at 0x%08" PFMT64x " but state recovery failed\n",
+					fcn->name, fcn->addr, stats.dispatcher);
+			}
+		}
+		r_anal_deobf_flatten_stats_fini (&stats);
+	}
+	r_list_free (selected);
+	if (!quiet && only == UT64_MAX && !recovered) {
+		R_LOG_INFO ("No OLLVM control-flow flattening recovered");
+	}
+}
+
 static bool cmd_anal_all(RCore *core, const char *input) {
 	if (*input == '?') {
 		r_cons_cmd_help (core->cons, help_msg_aa);
@@ -15931,7 +16016,19 @@ static bool cmd_anal_all(RCore *core, const char *input) {
 	}
 	switch (*input) {
 	case 'f':
-		if (input[1] == 'e') {  // "aafe"
+		if (input[1] == 'd') { // "aafd"
+			if (input[2] == '?') {
+				r_cons_cmd_help_match (core->cons, help_msg_aaf, "aafd", 0, true);
+			} else if (input[2] == 'q' && (!input[3] || input[3] == ' ')) {
+				const char *arg = input[3]? r_str_trim_head_ro (input + 3): NULL;
+				cmd_aafd (core, arg, true);
+			} else if (!input[2] || input[2] == ' ') {
+				const char *arg = input[2]? r_str_trim_head_ro (input + 2): NULL;
+				cmd_aafd (core, arg, false);
+			} else {
+				r_core_return_invalid_command (core, "aaf", input[2]);
+			}
+		} else if (input[1] == 'e') {  // "aafe"
 			r_core_cmd0 (core, "aef@@F");
 		} else if (input[1] == '?') {
 			r_cons_cmd_help_match (core->cons, help_msg_aa, "aaf", 0, true);

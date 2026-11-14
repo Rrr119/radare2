@@ -17,6 +17,7 @@ r_anal_sources = [
   'codemeta.c',
   'cycles.c',
   'data.c',
+  'deobf.c',
   'diff.c',
   'esil_cfg.c',
   'esil_dfg.c',
