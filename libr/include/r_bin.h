@@ -363,6 +363,7 @@ typedef struct r_bin_symbol_t {
 	ut16 arg_first;          // first arg register index in the bytecode reg space
 	ut16 arg_count;          // VM locals/arg slots for variable recovery (0 = no metadata)
 	ut16 cc_arg_count;       // descriptor/callconv arg slots; can be zero for no-arg funcs
+	ut16 local_count;        // VM non-argument local slots following the arg slots (0 = none)
 	/* only used by java */
 	ut64 vaddr;
 	ut64 paddr;

@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid17946",
+  "B": "/home/dev/feedback/uid17946",
+  "sha": "f7a2285d347ebd9514fd0584c3a97dae67a04bbe",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "radareorg",
+    "repo": "radare2",
+    "sha": "f7a2285d347ebd9514fd0584c3a97dae67a04bbe"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "radare2",
+    "cloneUrl": "https://github.com/Rrr119/radare2.git"
+  },
+  "at": "2026-11-14T14:33:23.080Z"
+}

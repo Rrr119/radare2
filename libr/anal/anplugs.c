@@ -347,17 +347,13 @@ R_API void *r_anal_plugin_action(RAnal *anal, RAnalPluginAction action, RAnalFun
 // the slot count comes from the file and each new variable rescans the existing ones
 #define VM_ARGS_MAX 256
 
-// For stack-VM archs (JVM, Dalvik, ...) bin parses each method's frame header
-// and attaches (arg_first, arg_count, arg_prefix) to its RBinSymbol. Anal turns
-// that into register-kind argument variables, named "<prefix><first + i>", with
-// delta = position of that register in the arch's reg profile.
-R_API bool r_anal_function_set_vm_args(RAnalFunction *fcn, const char *prefix, int first, int count) {
-	R_RETURN_VAL_IF_FAIL (fcn && fcn->anal, false);
-	if (count <= 0 || !prefix) {
+static bool set_vm_slots(RAnalFunction *fcn, const char *prefix, int first, int count, bool isarg) {
+	if (!fcn || !fcn->anal || !prefix || count <= 0) {
 		return false;
 	}
 	if (count > VM_ARGS_MAX) {
-		R_LOG_DEBUG ("Function at 0x%" PFMT64x " declares %d argument slots, keeping the first %d", fcn->addr, count, VM_ARGS_MAX);
+		R_LOG_DEBUG ("Function at 0x%" PFMT64x " declares %d %s slots, keeping the first %d",
+			fcn->addr, count, isarg? "argument": "local", VM_ARGS_MAX);
 		count = VM_ARGS_MAX;
 	}
 	int i;
@@ -372,11 +368,28 @@ R_API bool r_anal_function_set_vm_args(RAnalFunction *fcn, const char *prefix, i
 		}
 		int delta = ri->index;
 		r_unref (ri);
-		if (r_anal_function_set_var (fcn, delta, R_ANAL_VAR_KIND_REG, "int", 0, true, name)) {
+		if (r_anal_function_set_var (fcn, delta, R_ANAL_VAR_KIND_REG, "int", 0, isarg, name)) {
 			any = true;
 		}
 	}
 	return any;
+}
+
+// For stack-VM archs (JVM, Dalvik, ...) bin parses each method's frame header
+// and attaches (arg_first, arg_count, arg_prefix) to its RBinSymbol. Anal turns
+// that into register-kind argument variables, named "<prefix><first + i>", with
+// delta = position of that register in the arch's reg profile.
+R_API bool r_anal_function_set_vm_args(RAnalFunction *fcn, const char *prefix, int first, int count) {
+	R_RETURN_VAL_IF_FAIL (fcn && fcn->anal, false);
+	return set_vm_slots (fcn, prefix, first, count, true);
+}
+
+// Same register layout as r_anal_function_set_vm_args (), but the synthesized
+// register-kind variables are plain locals instead of arguments. Used by
+// stack-VM archs such as WebAssembly whose code headers declare local slots.
+R_API bool r_anal_function_set_vm_locals(RAnalFunction *fcn, const char *prefix, int first, int count) {
+	R_RETURN_VAL_IF_FAIL (fcn && fcn->anal, false);
+	return set_vm_slots (fcn, prefix, first, count, false);
 }
 
 static bool recover_vars_from_bin_meta(RAnal *anal, RAnalFunction *fcn) {
@@ -384,10 +397,15 @@ static bool recover_vars_from_bin_meta(RAnal *anal, RAnalFunction *fcn) {
 		return false;
 	}
 	RBinSymbol *sym = anal->binb.get_symbol_at (anal->binb.bin, fcn->addr);
-	if (!sym || sym->arg_count == 0 || !sym->arg_prefix) {
+	if (!sym || !sym->arg_prefix || (sym->arg_count == 0 && sym->local_count == 0)) {
 		return false;
 	}
-	return r_anal_function_set_vm_args (fcn, sym->arg_prefix, sym->arg_first, sym->arg_count);
+	bool args = r_anal_function_set_vm_args (fcn, sym->arg_prefix, sym->arg_first, sym->arg_count);
+	if (sym->local_count > 0) {
+		r_anal_function_set_vm_locals (fcn, sym->arg_prefix,
+			sym->arg_first + sym->arg_count, sym->local_count);
+	}
+	return args;
 }
 
 // Apply plugin-recovered variables to a function

@@ -77,6 +77,11 @@ static bool consume_mut_r(RBuffer *b, ut64 bound, ut8 *out) {
 
 static bool count_fits_r(RBuffer *b, ut64 bound, ut32 count) {
 	ut64 cur = r_buf_tell (b);
+	if (count == 0) {
+		// an empty vector consumes no bytes, so it is valid even when the
+		// cursor is one past the last in-section byte
+		return cur <= bound + 1;
+	}
 	return cur <= bound && count <= bound - cur + 1;
 }
 
@@ -384,7 +389,7 @@ const char *r_bin_wasm_valuetype_tostring(r_bin_wasm_value_type_t type) {
 	case R_BIN_WASM_VALUETYPE_i32:
 		return "i32";
 	case R_BIN_WASM_VALUETYPE_i64:
-		return "i62";
+		return "i64";
 	case R_BIN_WASM_VALUETYPE_f32:
 		return "f32";
 	case R_BIN_WASM_VALUETYPE_f64:

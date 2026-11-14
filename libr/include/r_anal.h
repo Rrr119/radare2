@@ -1180,6 +1180,7 @@ R_API bool r_anal_function_recover_vars_plugin(RAnal *anal, RAnalFunction *fcn);
 // for i in [0, count). Used for JVM/Dalvik-style per-method arg recovery driven
 // by bin-symbol metadata (RBinSymbol.arg_first/arg_count/arg_prefix).
 R_API bool r_anal_function_set_vm_args(RAnalFunction *fcn, const char *prefix, int first, int count);
+R_API bool r_anal_function_set_vm_locals(RAnalFunction *fcn, const char *prefix, int first, int count);
 R_API bool r_anal_is_aligned(RAnal *anal, const ut64 addr);
 R_API bool r_anal_use(RAnal *anal, const char *name);
 R_API bool r_anal_set_reg_profile(RAnal *anal, const char *rp);

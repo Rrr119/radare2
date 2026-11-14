@@ -121,10 +121,60 @@ static bool test_vm_args_edges(void) {
 	mu_end;
 }
 
+// Locals share the register layout of args but are synthesized as
+// non-argument register variables (the WebAssembly code-header case).
+static bool test_vm_locals(void) {
+	RAnal *anal = r_anal_new ();
+	mu_assert_notnull (anal, "r_anal_new");
+	load_jvm_profile (anal);
+	RAnalFunction *fcn = r_anal_create_function (anal, "M", 0x100, R_ANAL_FCN_TYPE_FCN, NULL);
+	mu_assert_notnull (fcn, "create_function");
+
+	// two args l0/l1, then two wasm locals l2/l3
+	bool args = r_anal_function_set_vm_args (fcn, "l", 0, 2);
+	mu_assert ("vm args applied", args);
+	bool locals = r_anal_function_set_vm_locals (fcn, "l", 2, 2);
+	mu_assert ("vm locals applied", locals);
+
+	RAnalVar *l2 = r_anal_function_get_var_byname (fcn, "l2");
+	RAnalVar *l3 = r_anal_function_get_var_byname (fcn, "l3");
+	mu_assert_notnull (l2, "local l2 present");
+	mu_assert_notnull (l3, "local l3 present");
+	mu_assert_eq (l2->kind, R_ANAL_VAR_KIND_REG, "l2 is REG-kind");
+	mu_assert_eq (l3->kind, R_ANAL_VAR_KIND_REG, "l3 is REG-kind");
+	mu_assert ("l2 is not an arg", !l2->isarg);
+	mu_assert ("l3 is not an arg", !l3->isarg);
+
+	RAnalVar *l0 = r_anal_function_get_var_byname (fcn, "l0");
+	mu_assert_notnull (l0, "arg l0 still present");
+	mu_assert ("l0 stays an arg", l0->isarg);
+
+	// args and locals are distinct variables
+	mu_assert_eq (r_anal_var_count_all (fcn), 4, "four register slots");
+
+	r_anal_free (anal);
+	mu_end;
+}
+
+static bool test_vm_locals_edges(void) {
+	RAnal *anal = r_anal_new ();
+	load_dalvik_profile (anal);
+	RAnalFunction *fcn = r_anal_create_function (anal, "m", 0x100, R_ANAL_FCN_TYPE_FCN, NULL);
+
+	mu_assert ("count 0 is a no-op", !r_anal_function_set_vm_locals (fcn, "v", 0, 0));
+	mu_assert ("NULL prefix is a no-op", !r_anal_function_set_vm_locals (fcn, NULL, 0, 1));
+	mu_assert_null (r_anal_function_get_var_byname (fcn, "v0"), "no var created on no-op");
+
+	r_anal_free (anal);
+	mu_end;
+}
+
 int all_tests(void) {
 	mu_run_test (test_vm_args_dalvik);
 	mu_run_test (test_vm_args_jvm);
 	mu_run_test (test_vm_args_edges);
+	mu_run_test (test_vm_locals);
+	mu_run_test (test_vm_locals_edges);
 	return tests_passed != tests_run;
 }
 

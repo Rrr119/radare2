@@ -281,6 +281,12 @@ static inline bool symbols_add_code(RBinWasmObj *bin, RVecRBinSymbol *vec, bool 
 			sym->arg_prefix = "l";
 			sym->ret_count = te->rets? te->rets->count: 0;
 		}
+		ut32 local_total = 0;
+		ut32 local_i;
+		for (local_i = 0; local_i < func->local_count; local_i++) {
+			local_total += func->locals[local_i].count;
+		}
+		sym->local_count = local_total;
 		set_sym_name (sym, name, is_exported);
 		code_idx++;
 	}

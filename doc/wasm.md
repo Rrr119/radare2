@@ -1,5 +1,52 @@
 # WebAssembly (WASI) support
 
+## Analyzing WebAssembly modules
+
+Radare2 recognizes `.wasm` binaries through their `\0asm` magic and parses the
+standard module sections. The `type`, `import`, `function`, `export`, `code`
+and custom `name` sections drive the analysis:
+
+- `iS` lists the parsed sections (`type`, `import`, `function`, `export`,
+  `code`, `data`, ...).
+- `is` lists imports and the functions defined in the `code` section. Imports
+  keep their module and field name, for example `imp.imp_add`.
+- `iE` lists exports. Exported functions keep their export name and are bound
+  as global symbols.
+- Each `code` entry becomes a function whose boundary comes from its declared
+  body size, so `aaa` then `afl` lists every defined function without scanning
+  the bytecode for prologues.
+
+WebAssembly is a stack machine: arguments and locals are slots addressed with
+`local.get`/`local.set` and exposed through the `l` register bank. The `type`
+section provides the argument count and the `code` header provides the local
+declarations. After analysis, `afi` reports both counts and `afv` shows the
+recovered register variables:
+
+```
+locals: 2
+args: 2
+arg int l0 @ l0
+arg int l1 @ l1
+var int l2 @ l2
+var int l3 @ l3
+```
+
+The per-function convention is a `dyncc` profile built from the same metadata,
+visible with `afi~callconv`. See `doc/dyncc.md` for the profile grammar.
+
+`call` opcodes reference functions by index. The bin plugin resolves the index
+to the target body address, so calls between defined functions create call
+xrefs visible with `ax`, the call graph (`agC`), and the `CALL XREF` comments
+in `pdf`. Calls to imported functions have no target address in the module and
+therefore do not produce an address xref; the import is still listed by `is`
+and `ii`.
+
+The disassembler understands the core opcodes plus the SIMD (`0xfd`),
+bulk-memory/reference (`0xfc`) and atomic (`0xfe`) prefixes; use `pd` or
+`pdf` for disassembly. The regression tests in `test/db/anal/wasm` use inline
+`hex://` modules covering section parsing, exports, argument/local recovery
+and call xrefs, so they run without external binary fixtures.
+
 Build with WASI SDK 29 using `sys/wasi.sh` (CLI), `sys/wasi-api.sh`
 (reactor exporting the C APIs), or `sys/wasi-browser.sh` (browser console
 and HTTP imports). Set `WASI_SDK` and `WASI_SYSROOT` to use an installed SDK.
